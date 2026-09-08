@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -28,19 +29,29 @@ client = OpenAI(
 
 MODEL = "openai/gpt-oss-120b"
 
+# Reduced to avoid Groq TPM rate-limit problems
+MAX_TOKENS = 4000
+
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
+
 
 # ==========================================================
 # AI REQUEST
 # ==========================================================
 
 def ask_ai(prompt):
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": """
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """
 You are an expert HR recruiter, ATS specialist,
 Job Description analyst and professional interviewer.
 
@@ -58,67 +69,99 @@ IMPORTANT RULES:
 10. Never stop in the middle of an object.
 11. Always close all JSON brackets.
 """
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0,
-            max_tokens=12000
-        )
-
-        text = response.choices[0].message.content.strip()
-
-        if not text:
-            raise ValueError(
-                "AI returned an empty response."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0,
+                max_tokens=MAX_TOKENS
             )
 
-        # Remove markdown code fences if AI adds them
-        if text.startswith("```json"):
-            text = text[7:]
+            text = response.choices[0].message.content.strip()
 
-        elif text.startswith("```"):
-            text = text[3:]
+            if not text:
+                raise ValueError(
+                    "AI returned an empty response."
+                )
 
-        if text.endswith("```"):
-            text = text[:-3]
+            # Remove Markdown code fences
+            if text.startswith("```json"):
+                text = text[7:]
 
-        text = text.strip()
+            elif text.startswith("```"):
+                text = text[3:]
 
-        # Find JSON object
-        start = text.find("{")
-        end = text.rfind("}")
+            if text.endswith("```"):
+                text = text[:-3]
 
-        if start == -1:
-            raise ValueError(
-                f"AI did not return JSON:\n{text}"
-            )
+            text = text.strip()
 
-        if end == -1 or end <= start:
-            raise ValueError(
-                "AI returned incomplete JSON."
-            )
+            # Locate JSON object
+            start = text.find("{")
+            end = text.rfind("}")
 
-        json_text = text[start:end + 1]
+            if start == -1:
+                raise ValueError(
+                    f"AI did not return JSON:\n{text}"
+                )
 
-        try:
-            return json.loads(json_text)
+            if end == -1 or end <= start:
+                raise ValueError(
+                    "AI returned incomplete JSON."
+                )
 
-        except json.JSONDecodeError as error:
-            print("\n========== INVALID AI RESPONSE ==========")
-            print(text)
-            print("=========================================\n")
+            json_text = text[start:end + 1]
 
-            raise ValueError(
-                f"AI returned invalid JSON: {error}"
-            )
+            try:
+                return json.loads(json_text)
 
-    except Exception as error:
-        raise ValueError(
-            f"AI request failed: {error}"
-        )
+            except json.JSONDecodeError as error:
+
+                print(
+                    "\n========== INVALID AI RESPONSE =========="
+                )
+                print(text)
+                print(
+                    "=========================================\n"
+                )
+
+                raise ValueError(
+                    f"AI returned invalid JSON: {error}"
+                )
+
+        except Exception as error:
+
+            last_error = error
+            error_text = str(error)
+
+            # Retry rate-limit errors
+            if (
+                "429" in error_text
+                or "rate_limit" in error_text.lower()
+            ):
+
+                if attempt < MAX_RETRIES - 1:
+
+                    wait_time = (
+                        RETRY_DELAY_SECONDS *
+                        (attempt + 1)
+                    )
+
+                    print(
+                        f"Groq rate limit reached. "
+                        f"Retrying in {wait_time} seconds..."
+                    )
+
+                    time.sleep(wait_time)
+                    continue
+
+            break
+
+    raise ValueError(
+        f"AI request failed: {last_error}"
+    )
 
 
 # ==========================================================
@@ -207,7 +250,10 @@ POSITION:
 JOB REQUIREMENTS:
 
 Required Skills:
-{json.dumps(required_skills, ensure_ascii=False)}
+{json.dumps(
+    required_skills,
+    ensure_ascii=False
+)}
 
 Experience:
 {experience}
@@ -216,7 +262,10 @@ Qualification:
 {qualification}
 
 Responsibilities:
-{json.dumps(responsibilities, ensure_ascii=False)}
+{json.dumps(
+    responsibilities,
+    ensure_ascii=False
+)}
 
 CANDIDATE RESUME:
 {resume_text}
@@ -269,39 +318,70 @@ RULES:
             "Resume analysis returned invalid data."
         )
 
-    # Safe defaults
-    if not isinstance(result.get("education"), list):
+    if not isinstance(
+        result.get("education"),
+        list
+    ):
         result["education"] = []
 
-    if not isinstance(result.get("resume_skills"), list):
+    if not isinstance(
+        result.get("resume_skills"),
+        list
+    ):
         result["resume_skills"] = []
 
-    if not isinstance(result.get("matched_skills"), list):
+    if not isinstance(
+        result.get("matched_skills"),
+        list
+    ):
         result["matched_skills"] = []
 
-    if not isinstance(result.get("missing_skills"), list):
+    if not isinstance(
+        result.get("missing_skills"),
+        list
+    ):
         result["missing_skills"] = []
 
-    if not isinstance(result.get("experience"), list):
+    if not isinstance(
+        result.get("experience"),
+        list
+    ):
         result["experience"] = []
 
-    if not isinstance(result.get("projects"), list):
+    if not isinstance(
+        result.get("projects"),
+        list
+    ):
         result["projects"] = []
 
-    if not isinstance(result.get("certifications"), list):
+    if not isinstance(
+        result.get("certifications"),
+        list
+    ):
         result["certifications"] = []
 
-    if not isinstance(result.get("responsibility_match"), list):
+    if not isinstance(
+        result.get("responsibility_match"),
+        list
+    ):
         result["responsibility_match"] = []
 
-    # ATS score
     try:
-        score = float(result.get("ats_score", 0))
+
+        score = float(
+            result.get(
+                "ats_score",
+                0
+            )
+        )
+
         result["ats_score"] = max(
             0,
             min(100, score)
         )
+
     except (ValueError, TypeError):
+
         result["ats_score"] = 0
 
     return result
@@ -314,8 +394,41 @@ RULES:
 def generate_interview_questions(
     position,
     job_requirements,
-    candidate_profile
+    candidate_profile,
+    previous_questions=None
 ):
+
+    if previous_questions is None:
+        previous_questions = []
+
+    # Keep only previous question text
+    previous_question_text = []
+
+    for item in previous_questions:
+
+        if isinstance(item, dict):
+
+            question = item.get(
+                "question",
+                ""
+            )
+
+            if question:
+                previous_question_text.append(
+                    str(question).strip()
+                )
+
+        elif isinstance(item, str):
+
+            if item.strip():
+                previous_question_text.append(
+                    item.strip()
+                )
+
+    # Limit history to avoid huge prompts
+    previous_question_text = (
+        previous_question_text[-50:]
+    )
 
     prompt = f"""
 You are an expert HR interviewer.
@@ -335,21 +448,55 @@ JOB REQUIREMENTS:
 CANDIDATE PROFILE:
 {candidate_profile}
 
-IMPORTANT:
 
-Do NOT generate 10 long-answer questions.
+==========================================================
+IMPORTANT: QUESTION VARIATION
+==========================================================
 
-The interview must be a MIXED assessment.
+Every candidate should NOT receive the exact same
+interview questions for the same position.
 
-Use these question types:
+Generate fresh and varied questions.
 
-- mcq
-- situational_mcq
-- yes_no
-- rating
-- short_answer
+Questions should vary by:
 
-Recommended distribution:
+- wording
+- scenario
+- skill being tested
+- practical situation
+- candidate experience
+- responsibilities
+- difficulty
+- examples
+- business context
+
+DO NOT copy any question from the previous-question list.
+
+DO NOT create a question that is essentially the same
+question with only a few words changed.
+
+Previous questions are listed below.
+
+PREVIOUS QUESTIONS:
+{json.dumps(
+    previous_question_text,
+    ensure_ascii=False
+)}
+
+If the previous-question list is empty, generate
+a completely fresh set.
+
+If previous questions exist, make sure ALL 10 new
+questions are meaningfully different.
+
+
+==========================================================
+INTERVIEW STRUCTURE
+==========================================================
+
+Generate EXACTLY 10 questions.
+
+Use this distribution:
 
 - 3 mcq
 - 2 situational_mcq
@@ -357,103 +504,145 @@ Recommended distribution:
 - 2 rating
 - 1 short_answer
 
-Total = EXACTLY 10 questions.
+TOTAL = EXACTLY 10.
+
 
 ==========================================================
-QUESTION TYPE RULES
+MCQ
 ==========================================================
 
-MCQ:
+Create 3 multiple-choice questions.
+
+Rules:
 
 - Exactly 4 options.
 - One best answer.
 - Options must be realistic.
-- Do not provide the correct answer.
+- Do not include the correct answer.
+- Questions must be position-specific.
 
-Example:
-
-{{
-    "question": "Which approach is best for handling multiple urgent tasks?",
-    "type": "mcq",
-    "options": [
-        "Prioritize based on urgency and importance",
-        "Complete the easiest task first",
-        "Wait for someone to decide",
-        "Handle tasks randomly"
-    ]
-}}
 
 ==========================================================
+SITUATIONAL MCQ
+==========================================================
 
-SITUATIONAL MCQ:
+Create 2 realistic workplace situations.
 
-- Give a realistic workplace situation.
+Rules:
+
 - Exactly 4 options.
 - One best answer.
-- Do not provide the correct answer.
+- Situation must be relevant to the position.
+- Do not include the correct answer.
+
 
 ==========================================================
+YES / NO
+==========================================================
 
-YES / NO:
+Create 2 questions.
 
-Exactly:
+Use exactly:
+
+"options": [
+    "Yes",
+    "No"
+]
+
+These should preferably check:
+
+- previous experience
+- exposure
+- familiarity
+- tools
+- responsibilities
+
+
+==========================================================
+RATING
+==========================================================
+
+Create 2 self-assessment questions.
+
+IMPORTANT:
+
+DO NOT use numeric 1-5 rating.
+
+The candidate should choose from:
+
+- Excellent
+- Good
+- Average
+- Poor
+- Very Poor
+
+Use this exact structure:
 
 {{
-    "question": "Have you previously worked with HRMS software?",
-    "type": "yes_no",
+    "question": "How would you rate your confidence in handling client communication?",
+    "type": "rating",
     "options": [
-        "Yes",
-        "No"
+        "Excellent",
+        "Good",
+        "Average",
+        "Poor",
+        "Very Poor"
     ]
 }}
 
-==========================================================
+Questions should be relevant to the selected position.
 
-RATING:
-
-Candidate rates themselves from 1 to 5.
-
-Use:
-
-{{
-    "question": "How confident are you in handling employee documentation?",
-    "type": "rating",
-    "min": 1,
-    "max": 5
-}}
-
-Do NOT provide options.
 
 ==========================================================
+SHORT ANSWER
+==========================================================
 
-SHORT ANSWER:
-
-Only one short-answer question.
+Create exactly 1 short-answer question.
 
 Candidate should answer in approximately 1-3 sentences.
 
-Example:
+It should be relevant to:
 
-{{
-    "question": "Briefly describe your most relevant experience.",
-    "type": "short_answer"
-}}
+- candidate experience
+- job responsibilities
+- problem solving
+- position-specific work
+
 
 ==========================================================
+QUALITY RULES
+==========================================================
 
-IMPORTANT QUESTION RULES:
+Every question must:
 
-- Questions must be relevant to the selected position.
-- Questions should consider the candidate's resume.
-- Questions should test practical job suitability.
+- Be relevant to the selected position.
+- Consider the candidate profile.
+- Test actual job suitability.
 - Avoid unnecessary generic questions.
-- Avoid repeating questions.
-- Avoid long essay questions.
-- Exactly 10 questions.
-- Do not include scores.
-- Do not include correct answers.
-- Do not include explanations.
-- Do not use Markdown.
+- Avoid duplicate questions.
+- Avoid repeated scenarios.
+- Avoid asking the same skill twice in the same way.
+- Be professionally written.
+- Be easy for a candidate to understand.
+
+DO NOT generate:
+
+- "Tell me about yourself"
+- "What are your strengths?"
+- "What are your weaknesses?"
+- generic questions unrelated to the position
+
+unless they are specifically useful for the position.
+
+Do not include:
+
+- correct answers
+- scores
+- evaluations
+- explanations
+- recruiter notes
+- Markdown
+
 
 ==========================================================
 RETURN FORMAT
@@ -494,8 +683,13 @@ Return ONLY valid JSON:
         {{
             "question": "",
             "type": "rating",
-            "min": 1,
-            "max": 5
+            "options": [
+                "Excellent",
+                "Good",
+                "Average",
+                "Poor",
+                "Very Poor"
+            ]
         }},
         {{
             "question": "",
@@ -504,13 +698,17 @@ Return ONLY valid JSON:
     ]
 }}
 
-FINAL RULE:
+FINAL REQUIREMENTS:
 
-Return EXACTLY 10 complete questions.
-
-Do not stop early.
-
-Make sure the JSON is completely closed.
+- EXACTLY 10 questions.
+- 3 mcq.
+- 2 situational_mcq.
+- 2 yes_no.
+- 2 rating.
+- 1 short_answer.
+- Every question must be different.
+- No question may duplicate the previous questions.
+- Return COMPLETE JSON.
 """
 
     result = ask_ai(prompt)
@@ -520,9 +718,15 @@ Make sure the JSON is completely closed.
             "Interview question generation returned invalid data."
         )
 
-    questions = result.get("questions", [])
+    questions = result.get(
+        "questions",
+        []
+    )
 
-    if not isinstance(questions, list):
+    if not isinstance(
+        questions,
+        list
+    ):
         raise ValueError(
             "Interview questions must be a list."
         )
@@ -539,15 +743,24 @@ Make sure the JSON is completely closed.
 
     for item in questions:
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict
+        ):
             continue
 
         question = str(
-            item.get("question", "")
+            item.get(
+                "question",
+                ""
+            )
         ).strip()
 
         question_type = str(
-            item.get("type", "")
+            item.get(
+                "type",
+                ""
+            )
         ).strip().lower()
 
         if not question:
@@ -556,15 +769,24 @@ Make sure the JSON is completely closed.
         if question_type not in allowed_types:
             continue
 
-        # MCQ / Situational MCQ
+        # --------------------------------------------------
+        # MCQ
+        # --------------------------------------------------
+
         if question_type in {
             "mcq",
             "situational_mcq"
         }:
 
-            options = item.get("options", [])
+            options = item.get(
+                "options",
+                []
+            )
 
-            if not isinstance(options, list):
+            if not isinstance(
+                options,
+                list
+            ):
                 continue
 
             options = [
@@ -582,7 +804,10 @@ Make sure the JSON is completely closed.
                 "options": options
             })
 
-        # Yes / No
+        # --------------------------------------------------
+        # YES / NO
+        # --------------------------------------------------
+
         elif question_type == "yes_no":
 
             clean_questions.append({
@@ -594,17 +819,28 @@ Make sure the JSON is completely closed.
                 ]
             })
 
-        # Rating
+        # --------------------------------------------------
+        # RATING
+        # --------------------------------------------------
+
         elif question_type == "rating":
 
             clean_questions.append({
                 "question": question,
                 "type": "rating",
-                "min": 1,
-                "max": 5
+                "options": [
+                    "Excellent",
+                    "Good",
+                    "Average",
+                    "Poor",
+                    "Very Poor"
+                ]
             })
 
-        # Short Answer
+        # --------------------------------------------------
+        # SHORT ANSWER
+        # --------------------------------------------------
+
         elif question_type == "short_answer":
 
             clean_questions.append({
@@ -612,16 +848,110 @@ Make sure the JSON is completely closed.
                 "type": "short_answer"
             })
 
-    if len(clean_questions) < 10:
+    # ======================================================
+    # REMOVE DUPLICATE QUESTIONS
+    # ======================================================
+
+    unique_questions = []
+    seen_questions = set()
+
+    for item in clean_questions:
+
+        normalized = (
+            item["question"]
+            .strip()
+            .lower()
+        )
+
+        if normalized in seen_questions:
+            continue
+
+        # Do not allow exact previous question
+        if normalized in {
+            q.lower()
+            for q in previous_question_text
+        }:
+            continue
+
+        seen_questions.add(
+            normalized
+        )
+
+        unique_questions.append(
+            item
+        )
+
+    # ======================================================
+    # VALIDATE QUESTION DISTRIBUTION
+    # ======================================================
+
+    mcq_count = sum(
+        1
+        for q in unique_questions
+        if q["type"] == "mcq"
+    )
+
+    situational_count = sum(
+        1
+        for q in unique_questions
+        if q["type"] == "situational_mcq"
+    )
+
+    yes_no_count = sum(
+        1
+        for q in unique_questions
+        if q["type"] == "yes_no"
+    )
+
+    rating_count = sum(
+        1
+        for q in unique_questions
+        if q["type"] == "rating"
+    )
+
+    short_answer_count = sum(
+        1
+        for q in unique_questions
+        if q["type"] == "short_answer"
+    )
+
+    if len(unique_questions) < 10:
+
         raise ValueError(
             f"AI generated only "
-            f"{len(clean_questions)} valid questions. "
+            f"{len(unique_questions)} unique valid questions. "
             f"Expected exactly 10."
         )
 
+    if mcq_count < 3:
+        raise ValueError(
+            "Interview must contain at least 3 MCQ questions."
+        )
+
+    if situational_count < 2:
+        raise ValueError(
+            "Interview must contain at least 2 situational MCQ questions."
+        )
+
+    if yes_no_count < 2:
+        raise ValueError(
+            "Interview must contain at least 2 Yes/No questions."
+        )
+
+    if rating_count < 2:
+        raise ValueError(
+            "Interview must contain at least 2 rating questions."
+        )
+
+    if short_answer_count < 1:
+        raise ValueError(
+            "Interview must contain at least 1 short-answer question."
+        )
+
     return {
-        "questions": clean_questions[:10]
+        "questions": unique_questions[:10]
     }
+
 
 # ==========================================================
 # INTERVIEW ANSWER EVALUATION
@@ -633,18 +963,6 @@ def evaluate_interview_answer(
     question_type,
     options=None
 ):
-    """
-    Evaluate a candidate's interview answer using AI.
-
-    Score:
-        0-10
-
-    Returns:
-        {
-            "score": 0-10,
-            "evaluation": "..."
-        }
-    """
 
     options = options or []
 
@@ -658,10 +976,14 @@ QUESTION TYPE:
 {question_type}
 
 OPTIONS:
-{json.dumps(options, ensure_ascii=False)}
+{json.dumps(
+    options,
+    ensure_ascii=False
+)}
 
 CANDIDATE ANSWER:
 {answer}
+
 
 ==========================================================
 EVALUATION RULES
@@ -669,40 +991,61 @@ EVALUATION RULES
 
 Evaluate the answer fairly and professionally.
 
-For MCQ and situational_mcq:
+
+MCQ / SITUATIONAL MCQ:
+
 - Check whether the selected answer is the best option.
-- Use the question and all provided options to determine correctness.
-- Do not assume the candidate selected an option that they did not provide.
+- Use the question and all provided options.
+- Give a higher score when the candidate selects the best
+  professional response.
 
-For yes_no:
-- Evaluate whether the answer is relevant and consistent with the question.
-- Do not mark a candidate wrong simply because the answer is "Yes" or "No".
-- This is a candidate-experience/background response, not necessarily a right/wrong question.
 
-For rating:
-- The candidate gives a self-rating from 1 to 5.
-- Convert the rating reasonably to a score out of 10.
-- Rating 1 = approximately 2/10
-- Rating 2 = approximately 4/10
-- Rating 3 = approximately 6/10
-- Rating 4 = approximately 8/10
-- Rating 5 = 10/10
-- Do not judge the candidate's confidence as factually wrong.
+YES / NO:
 
-For short_answer:
-- Evaluate relevance.
-- Evaluate clarity.
-- Evaluate practical understanding.
-- Evaluate whether the answer addresses the question.
-- Do not require a specific wording.
+- Do NOT automatically treat Yes as correct.
+- Do NOT automatically treat No as wrong.
+- Evaluate whether the response is relevant.
+- This generally represents candidate experience/background.
+
+
+RATING:
+
+The candidate selects one of:
+
+- Excellent
+- Good
+- Average
+- Poor
+- Very Poor
+
+Convert the rating to a score out of 10:
+
+Excellent = 10
+Good = 8
+Average = 6
+Poor = 4
+Very Poor = 2
+
+Do not mark the candidate wrong because it is a
+self-assessment.
+
+
+SHORT ANSWER:
+
+Evaluate:
+
+- relevance
+- clarity
+- practical understanding
+- completeness
+- position relevance
+
 
 ==========================================================
 SCORING
 ==========================================================
 
-Return a score from 0 to 10.
-
-General guidance:
+Return an integer score from 0 to 10.
 
 9-10 = Excellent
 7-8  = Good
@@ -712,26 +1055,27 @@ General guidance:
 
 Do not give everyone the same score.
 
+
 ==========================================================
-EVALUATION TEXT
+FEEDBACK
 ==========================================================
 
 Provide concise professional recruiter feedback.
 
-The evaluation should explain:
-- what was good or bad about the answer
-- whether it was relevant
-- what could be improved
+Mention:
 
-Keep the evaluation within 2-3 sentences.
+- what was good or bad
+- relevance
+- what can be improved
 
-Do not mention hidden scoring rules.
+Keep it within 2-3 sentences.
+
 
 ==========================================================
 RETURN FORMAT
 ==========================================================
 
-Return ONLY valid JSON.
+Return ONLY valid JSON:
 
 {{
     "score": 0,
@@ -739,6 +1083,7 @@ Return ONLY valid JSON.
 }}
 
 IMPORTANT:
+
 - score must be an integer from 0 to 10.
 - evaluation must be a string.
 - Never return Markdown.
@@ -747,38 +1092,56 @@ IMPORTANT:
 
     result = ask_ai(prompt)
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict
+    ):
         raise ValueError(
             "Interview answer evaluation returned invalid data."
         )
 
-    # ------------------------------------------------------
-    # SCORE
-    # ------------------------------------------------------
-
     try:
-        score = int(float(result.get("score", 0)))
-    except (ValueError, TypeError):
+
+        score = int(
+            float(
+                result.get(
+                    "score",
+                    0
+                )
+            )
+        )
+
+    except (
+        ValueError,
+        TypeError
+    ):
+
         score = 0
 
-    score = max(0, min(10, score))
-
-    # ------------------------------------------------------
-    # EVALUATION
-    # ------------------------------------------------------
+    score = max(
+        0,
+        min(10, score)
+    )
 
     evaluation = result.get(
         "evaluation",
         "No evaluation was provided."
     )
 
-    if not isinstance(evaluation, str):
-        evaluation = str(evaluation)
+    if not isinstance(
+        evaluation,
+        str
+    ):
+        evaluation = str(
+            evaluation
+        )
 
     evaluation = evaluation.strip()
 
     if not evaluation:
-        evaluation = "No evaluation was provided."
+        evaluation = (
+            "No evaluation was provided."
+        )
 
     return {
         "score": score,
