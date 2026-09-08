@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const BACKEND_URL = "http://127.0.0.1:8000";
+const BACKEND_URL = "https://ai-recruitment-backend-nv6b.onrender.com";
 
 function App() {
   const [positions, setPositions] = useState([]);
